@@ -1,8 +1,11 @@
 library(dplyr)
+library(jsonlite)
 
-setwd("/mnt/storage/private/mrcieu/research/scratch/IGD/data/public/ukbiobank/processed/")
+datadir <- scan("../config.txt", what="character")
+pwd <- getwd()
+setwd(datadir)
 a <- list.files()
-
+setwd(pwd)
 
 # Get LDSC
 d <- list()
@@ -10,7 +13,7 @@ i <- 1
 for(id in a)
 {
 	message(id)
-	x <- readLines(sprintf("~/IGD/data/public/ukbiobank/processed/%s/ldsc.txt.log", id))
+	x <- readLines(sprintf("%s/%s/ldsc.txt.log", datadir, id))
 	out <- list()
 	out$id <- id
 	out$cutoff <- grep("cutoff", x, value=TRUE) %>% gsub("\\.", "", .) %>% strsplit(.," ") %>% first() %>% nth(7) %>% as.numeric()
@@ -32,7 +35,7 @@ d <- list()
 for(i in a)
 {
 	message(i)
-	d[[i]] <- tibble(rsid=scan(paste0(i, "/clump.txt"), what="character"), id=i)
+	d[[i]] <- tibble(rsid=scan(sprintf("%s/%s/clump.txt", datadir, id), what="character"), id=i)
 }
 
 clumped <- bind_rows(d)
