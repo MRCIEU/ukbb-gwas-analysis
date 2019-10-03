@@ -32,10 +32,10 @@ ldsc <- bind_rows(d)
 
 # Get clumped
 d <- list()
-for(i in a)
+for(id in a)
 {
-	message(i)
-	d[[i]] <- tibble(rsid=scan(sprintf("%s/%s/clump.txt", datadir, id), what="character"), id=i)
+	message(id)
+	d[[id]] <- tibble(rsid=scan(sprintf("%s/%s/clump.txt", datadir, id), what="character"), id=id)
 }
 
 clumped <- bind_rows(d)
