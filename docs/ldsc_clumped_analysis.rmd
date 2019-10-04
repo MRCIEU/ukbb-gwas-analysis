@@ -1,0 +1,283 @@
+---
+title: Comparing clumping and LDSC results in UKBB GWAS
+author: Gibran Hemani
+date: 03/10/2019
+---
+
+## Abstract
+
+- When there are very few cases (e.g. <1000) there are no reliable top hits, and almost no evidence for any heritability. These traits comprise the majority (more than three quarters) of the ones analysed here. It's probably not worth keeping these in the database.
+- Removing top hits based on minor allele count seems to be a reasonable way to control false discoveries.
+- There seems to be quite a lot of residual population structure which is not handled by the linear mixed model.
+
+* * *
+
+```{r}
+library(knitr)
+opts_chunk$set(warning=FALSE, message=FALSE, cache=TRUE, dev="png")
+
+suppressWarnings(suppressPackageStartupMessages({
+	library(tidyverse)
+	library(TwoSampleMR)
+	library(data.table)
+}))
+
+load("../results/collate.rdata")
+ao <- available_outcomes(access_token=NULL)
+ao$id <- gsub("UKB-b:", "UKB-b-", ao$id)
+ao <- subset(ao, id %in% ldsc$id)
+```
+
+There are `r nrow(ldsc)` UKB traits that have been GWAS'd, but only `r sum(ldsc$id %in% ao$id)` are uploaded to the MR-Base database. The omitted ones are due to having low numbers of cases.
+
+There are `r nrow(clumped)` total GWAS hits, after strict clumping.
+
+The average number of hits per GWAS is:
+
+```{r}
+clumped %>% 
+group_by(id) %>%
+summarise(n=n()) %>%
+summarise(n=mean(n))
+```
+
+The top numbers are:
+
+```{r}
+nclumped <- clumped %>%
+group_by(id) %>%
+summarise(n=n()) %>%
+arrange(desc(n))
+head(nclumped, 10)
+```
+
+Most of the top ones are excluded from the MR-Base upload:
+
+```{r}
+table(
+	head(nclumped, 10)$id %in% ao$id
+)
+```
+
+A bit strange.. let's just discard ones that aren't in MR-Base
+
+
+```{r}
+ldsc <- inner_join(ldsc, ao, "id")
+dim(ldsc)
+dim(ao)
+```
+
+
+Let's look at the types of traits.
+
+```{r}
+table(ldsc$category)
+```
+
+Almost everything is binary. What is the distribution of numbers of cases
+
+```{r}
+ggplot(ldsc, aes(x=ncase)) +
+geom_histogram(bins=100) +
+scale_x_log10()
+```
+
+Most of these seem to be less than like 500 cases
+
+```{r}
+lapply(c(100,200,300,400,500,1000,5000,10000), function(x)
+{
+	filter(ldsc, category == "Binary") %>%
+	summarise(count=sum(ncase < x)) %>%
+	mutate(total=sum(ldsc$category=="Binary"), minimum_ncases=x) %>%
+	select(minimum_ncases, total, count) %>%
+	mutate(proportion=count/total)
+}) %>% bind_rows
+```
+
+The vast majority of these have very small numbers of cases. How reliable are they? Compare the number of hits against h2 estimates from LDSC.
+
+```{r}
+ggplot(ldsc, aes(x=h2, y=nclumped)) +
+geom_point(aes(colour=ncase < 500))
+```
+
+There is a large mass of associations that have 0 heritability but huge numbers of associations. These are all binary traits with fewer than 500 cases.
+
+How many of the clumped hits are reliable?
+
+```{r}
+ggplot(subset(ldsc, ncase > 500 | is.na(ncase)), aes(x=h2, y=nclumped)) +
+geom_point(aes(colour=category)) +
+scale_colour_brewer(type="qual")
+```
+
+Are any GWASs with ncase < 500 reliable? e.g. do any of them have significant h2?
+
+```{r}
+filter(ldsc, ncase < 500) %>%
+mutate(h2_z = h2 / h2_se) %>%
+ggplot(., aes(x=h2_z)) +
+geom_histogram(bins=1000)
+```
+
+There are as many 'significant' h2 estimates that are negative as there are that are positive. This suggests none of these are actually representing a signal at all. Check relationship with h2 and number of cases
+
+```{r}
+ldsc %>%
+mutate(h2_z = h2 / h2_se) %>%
+ggplot(., aes(y=h2, x=ncase)) +
+geom_point(aes(colour=h2_z > 4), size=0.2) +
+scale_x_log10() +
+ylim(c(-0.05,0.15)) +
+geom_vline(xintercept=1000)
+```
+
+So, I think we could happily drop any study that has fewer than 1000 cases. Fewer than that and there is really no h2 signal. What's left, if we keep only studies with more than 1000 cases?
+
+```{r}
+ldsc$keep <- ldsc$ncase > 1000 | is.na(ldsc$ncase)
+table(subset(ldsc, keep)$category)
+```
+
+## Minor allele count filters
+
+Phil suggested having a minor allele count in cases cutoff of 90 for any GWAS signal. What does this look like for different MAF and number of cases?
+
+```{r}
+param <- expand.grid(
+	maf=seq(0.001,0.5,by=0.002),
+	ncase=seq(50,10000,by=50)
+)
+param$mac <- param$maf^2 * param$ncase
+ggplot(param, aes(x=ncase,y=maf)) +
+geom_tile(aes(fill=mac>=90)) +
+geom_vline(xintercept=1000) +
+geom_hline(yintercept=min(subset(param, ncase==1000 & mac >= 90)$maf))
+```
+
+We're looking at pretty strict thresholds when there are as few as 1000 cases. No GWAS hits allowed with MAF < `r min(subset(param, ncase==1000 & mac >= 90)$maf)`.
+
+
+## Filtering clumped hits based on MAC >= 90
+
+Get allele frequencies for each SNP analysed:
+
+```{r}
+alfreq <- fread("../data/ukbmaf.txt.gz")
+names(alfreq) <- c("rsid", "ukb_freq")
+hist(alfreq$ukb_freq, breaks=1000)
+table(duplicated(alfreq$rsid))
+alfreq <- arrange(alfreq, ukb_freq) %>%
+	filter(!duplicated(rsid))
+alfreq$maf <- alfreq$ukb_freq
+alfreq$maf[alfreq$maf > 0.5] <- 1 - alfreq$maf[alfreq$maf > 0.5]
+```
+
+Merge in alfreq and ncases
+
+```{r}
+clumped <- subset(clumped, id %in% ao$id)
+clumped <- left_join(clumped, alfreq, by="rsid")
+
+
+missingids <- ldsc$id[!ldsc$id %in% clumped$id]
+ldsc$clumped_missing <- ldsc$id %in% missingids
+table(subset(ldsc, clumped_missing)$category)
+
+index <- match(clumped$id, ao$id)
+stopifnot(all(clumped$id == ao$id[index]))
+clumped$ncase <- ao$ncase[index]
+clumped$ncase[is.na(clumped$ncase)] <- ao$sample_size[index][is.na(clumped$ncase)]
+clumped$mac <- clumped$maf^2 * clumped$ncase
+```
+
+How many do we keep for different mac cutoffs?
+
+```{r}
+tibble(mac_threshold = seq(1,100,by=1)) %>%
+	group_by(mac_threshold) %>%
+	summarise(remaining_hits = sum(clumped$mac > mac_threshold)) %>%
+ggplot(., aes(x=mac_threshold, y=remaining_hits)) +
+geom_point() +
+geom_vline(xintercept=10)
+```
+
+There are `r sum(clumped$mac < 1)` hits with expected mac < 1. So, that's where the vast majority of hits are coming from. After that, there's not really much difference in terms of number of associations when mac > 1 and mac > 100. So, maybe take the threshold of mac > 10?
+
+This would leave `r sum(clumped$mac > 10)` GWAS hits.
+
+
+What studies are coming up? e.g. how many cases in binary etc?
+
+```{r}
+clumped$keep <- clumped$mac > 10
+nclumped <- clumped %>%
+group_by(id) %>%
+summarise(nclumped_mac10 = sum(keep))
+ldsc <- left_join(ldsc, nclumped, by="id")
+ldsc$nclumped_mac10[is.na(ldsc$nclumped_mac10)] <- 0
+group_by(ldsc, category) %>%
+summarise(studies_with_hits = sum(nclumped_mac10 > 0), studies_without_hits = sum(nclumped_mac10 == 0))
+```
+
+Relationship between number of hits and h2
+
+```{r}
+ggplot(ldsc, aes(x=h2, y=nclumped_mac10)) +
+geom_point(aes(colour=category)) +
+scale_colour_brewer(type="qual")
+```
+
+## Population stratification
+
+This is the distribution of h2 estimates based on LD score regression (LDSC):
+
+```{r}
+hist(ldsc$h2[ldsc$keep], breaks=1000)
+```
+
+Distribution of intercept estimates (i.e. how much pop strat)
+
+```{r}
+hist(ldsc$intercept[ldsc$keep], breaks=1000)
+```
+
+Some of these are really large intercept values, what are they?
+
+```{r}
+ldsc %>%
+arrange(desc(intercept)) %>%
+select(id, trait, intercept, h2, nclumped_mac10) %>%
+head(30) %>% kable
+```
+
+Plot of intercept against number of hits
+
+```{r}
+ggplot(ldsc[ldsc$keep,], aes(x=intercept, y=nclumped_mac10)) +
+geom_point(aes(colour=category)) +
+scale_colour_brewer(type="qual")
+```
+
+Distribution of lambda values
+
+```{r}
+hist(ldsc$lambda[ldsc$keep], breaks=1000)
+```
+
+Relationship of lambda and ldsc intercept
+
+```{r}
+plot(lambda ~ intercept, ldsc[ldsc$keep,])
+```
+
+It looks like there are two groups of traits which have high intercept / lambda
+
+- those that are a mixture of biology and structure (e.g. height probably has bias due to assortative mating and dynastic effects etc)
+- traits that relate to demography
+
+Not sure what we can do about these. The ones related to structure are likely to be quite useful, e.g. as negative controls in MR. The height and BMI traits that have evidence of structure could be analysed using more robust methods e.g. within-family analysis.
+
+
