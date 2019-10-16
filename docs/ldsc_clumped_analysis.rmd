@@ -54,9 +54,7 @@ head(nclumped, 10)
 Most of the top ones are excluded from the MR-Base upload:
 
 ```{r}
-table(
-	head(nclumped, 10)$id %in% ao$id
-)
+table(head(nclumped, 10)$id %in% ao$id)
 ```
 
 A bit strange.. let's just discard ones that aren't in MR-Base
@@ -93,7 +91,7 @@ lapply(c(100,200,300,400,500,1000,5000,10000), function(x)
 	mutate(total=sum(ldsc$category=="Binary"), minimum_ncases=x) %>%
 	select(minimum_ncases, total, count) %>%
 	mutate(proportion=count/total)
-}) %>% bind_rows
+}) %>% bind_rows %>% kable
 ```
 
 The vast majority of these have very small numbers of cases. How reliable are they? Compare the number of hits against h2 estimates from LDSC.
@@ -140,6 +138,13 @@ So, I think we could happily drop any study that has fewer than 1000 cases. Fewe
 ldsc$keep <- ldsc$ncase > 1000 | is.na(ldsc$ncase)
 table(subset(ldsc, keep)$category)
 ```
+
+Write list of GWASs to keep
+
+```{r}
+write.table(subset(ldsc, keep)$id, file="ukb_id_keep.txt", row=F, col=F, qu=F)
+```
+
 
 ## Minor allele count filters
 
@@ -189,30 +194,45 @@ table(subset(ldsc, clumped_missing)$category)
 index <- match(clumped$id, ao$id)
 stopifnot(all(clumped$id == ao$id[index]))
 clumped$ncase <- ao$ncase[index]
+clumped$binary <- !is.na(clumped$ncase)
 clumped$ncase[is.na(clumped$ncase)] <- ao$sample_size[index][is.na(clumped$ncase)]
-clumped$mac <- clumped$maf^2 * clumped$ncase
+clumped$mac <- clumped$maf^2 * clumped$ncase * 2 + 2 * clumped$maf * (1-clumped$maf) ** clumped$ncase
 ```
 
 How many do we keep for different mac cutoffs?
 
 ```{r}
-tibble(mac_threshold = seq(1,100,by=1)) %>%
-	group_by(mac_threshold) %>%
-	summarise(remaining_hits = sum(clumped$mac > mac_threshold)) %>%
-ggplot(., aes(x=mac_threshold, y=remaining_hits)) +
+temp <- expand.grid(mac_threshold = seq(0,10,by=1), binary=c(TRUE,FALSE)) %>%
+	group_by(mac_threshold, binary) %>%
+	summarise(remaining_hits = sum(clumped[clumped$binary == binary,]$mac > mac_threshold))
+ggplot(temp, aes(x=mac_threshold, y=remaining_hits)) +
 geom_point() +
-geom_vline(xintercept=10)
+geom_vline(xintercept=10) +
+facet_grid(binary ~ ., scale="free_y")
 ```
 
-There are `r sum(clumped$mac < 1)` hits with expected mac < 1. So, that's where the vast majority of hits are coming from. After that, there's not really much difference in terms of number of associations when mac > 1 and mac > 100. So, maybe take the threshold of mac > 10?
+There are `r sum(clumped$mac < 1)` hits with expected mac < 1. So, that's where the vast majority of hits are coming from. Remove those from the figure to see what the rest of the distribution looks like,
 
-This would leave `r sum(clumped$mac > 10)` GWAS hits.
+
+```{r}
+temp <- expand.grid(mac_threshold = seq(100,10000,by=50), binary=c(TRUE,FALSE)) %>%
+	group_by(mac_threshold, binary) %>%
+	summarise(remaining_hits = sum(clumped[clumped$binary == binary,]$mac > mac_threshold))
+ggplot(temp, aes(x=mac_threshold, y=remaining_hits)) +
+geom_point() +
+facet_grid(binary ~ ., scale="free_y") +
+geom_vline(xintercept=700)
+```
+
+A higher threshold should reduce the possibility of false positives due to BoltLMM failure, but at what point are we throwing away too many? After that, there's not an obvious cutoff in terms of number of associations when mac > 1 and mac > 10000. So, maybe take the threshold of mac > 700, that seems to be a point where the slope gets less steep??
+
+This would leave `r sum(clumped$mac > 700)` GWAS hits.
 
 
 What studies are coming up? e.g. how many cases in binary etc?
 
 ```{r}
-clumped$keep <- clumped$mac > 10
+clumped$keep <- clumped$mac > 700
 nclumped <- clumped %>%
 group_by(id) %>%
 summarise(nclumped_mac10 = sum(keep))
